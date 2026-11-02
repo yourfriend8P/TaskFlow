@@ -32,7 +32,8 @@ class User(Base):
     )
     created_projects: Mapped[list["Project"]] = relationship(back_populates="creator")
     created_tasks: Mapped[list["Task"]] = relationship(
-        back_populates="assignee", foreign_keys="Task.assigned_to_id"
+        back_populates="creator",
+        foreign_keys="Task.created_by_id",
     )
     assigned_tasks: Mapped[list["Task"]] = relationship(
         back_populates="assignee",

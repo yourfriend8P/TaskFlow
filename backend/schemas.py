@@ -56,3 +56,11 @@ class TokenResponse(BaseModel):
 
 class TaskAssign(BaseModel):
     assigned_to_id: int = Field(gt=0)
+
+
+class UserStatusUpdate(BaseModel):
+    is_active: bool
+
+
+class UserRoleUpdate(BaseModel):
+    role: Literal["user", "upper_user", "admin"]
