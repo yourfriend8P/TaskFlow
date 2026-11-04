@@ -54,7 +54,7 @@ class Project(Base):
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     creator: Mapped["User"] = relationship(back_populates="created_projects")
-    tasks: Mapped["Task"] = relationship(back_populates="project")
+    tasks: Mapped[list["Task"]] = relationship(back_populates="project")
 
 
 class Task(Base):

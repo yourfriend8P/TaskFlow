@@ -9,6 +9,7 @@ class TaskCreate(BaseModel):
     description: str = Field(default="", max_length=500)
     priority: Literal["low", "medium", "high"]
     due_date: datetime | None = None
+    project_id: int | None = None
 
 
 class TaskUpdate(BaseModel):
@@ -16,6 +17,7 @@ class TaskUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     priority: Literal["low", "medium", "high"] | None = None
     status: str | None = None
+    project_id: int | None = None
 
 
 # Pydantic model for outgoing task data
@@ -25,7 +27,28 @@ class TaskResponse(BaseModel):
     title: str
     description: str
     # completed: bool
+    status: str
     priority: str
+    project_id: int | None
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=3, max_length=150)
+    description: str = Field(default="", max_length=1000)
+
+
+class ProjectResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    description: str
+    created_by_id: int
+    created_at: datetime
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=3, max_length=150)
+    description: str | None = Field(default=None, max_length=1000)
 
 
 class UserCreate(BaseModel):
@@ -36,7 +59,6 @@ class UserCreate(BaseModel):
 
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
     id: int
     name: str
     email: EmailStr
@@ -58,9 +80,11 @@ class TaskAssign(BaseModel):
     assigned_to_id: int = Field(gt=0)
 
 
+# To activate or deactivate a user performed by admin
 class UserStatusUpdate(BaseModel):
     is_active: bool
 
 
+# To update the role of a user performed by admin
 class UserRoleUpdate(BaseModel):
     role: Literal["user", "upper_user", "admin"]

@@ -18,6 +18,9 @@ from schemas import (
     TaskAssign,
     UserStatusUpdate,
     UserRoleUpdate,
+    ProjectCreate,
+    ProjectResponse,
+    ProjectUpdate,
 )
 from security import hash_password, verify_password
 
@@ -116,6 +119,7 @@ def health_check(db: Session = Depends(get_db)):
     return {"status": "healthy", "database": "connected"}
 
 
+# ------------------------------------------------------------Login Endpoints----------------------------------------------------------
 # Register a new user
 @app.post(
     "/auth/register",
@@ -193,20 +197,75 @@ def login(
     }
 
 
+# ------------------------------------------------------------Task Endpoints----------------------------------------------------------
 # Read all tasks, with optional filters
 @app.get("/tasks", response_model=list[TaskResponse])
 def list_tasks(
-    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)
+    project_id: int | None = None,
+    task_status: str | None = None,
+    priority: str | None = None,
+    search: str | None = None,
+    overdue: bool = False,
+    due_before: datetime | None = None,
+    skip: int = Query(
+        default=0, ge=0
+    ),  # for pagination and used query to prevent -ve number
+    limit: int = Query(
+        default=20, ge=1, le=100
+    ),  # for pagination and used query to prevent -ve number
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins cannot access individual task records",
+        )
+
+    conditions = (models.Task.created_by_id == current_user.id) | (
+        models.Task.assigned_to_id == current_user.id
+    )
+
+    if project_id is not None:
+        conditions = conditions & (models.Task.project_id == project_id)
+
+    if task_status is not None:
+        if task_status not in ["todo", "in_progress", "completed"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid task status",
+            )
+        conditions = conditions & (models.Task.status == task_status)
+
+    if priority is not None:
+        if priority not in ["low", "medium", "high"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid task priority"
+            )
+        conditions = conditions & (models.Task.priority == priority)
+
+    if search is not None:
+        search = search.strip()
+
+        if search:
+            conditions = conditions & (models.Task.title.ilike(f"%{search}%"))
+
+    if overdue:
+        conditions = conditions & (
+            (models.Task.due_date < datetime.now(timezone.utc))
+            & (models.Task.status != "completed")
+            & (models.Task.due_date.is_not(None))
+        )
+
+    if due_before is not None:
+        conditions = conditions & (models.Task.due_date <= due_before)
+
     statement = (
         select(models.Task)
-        .where(
-            or_(
-                models.Task.created_by_id == current_user.id,
-                models.Task.assigned_to_id == current_user.id,
-            )
-        )
+        .where(conditions)
         .order_by(models.Task.id.desc())
+        .offset(skip)
+        .limit(limit)
     )
 
     return db.scalars(statement).all()
@@ -255,13 +314,29 @@ def create_task(
     current_user: models.User = Depends(get_current_user),
 ):
 
+    if task_data.project_id is not None:
+        project = db.scalar(
+            select(models.Project).where(
+                models.Project.id == task_data.project_id,
+                models.Project.created_by_id == current_user.id,
+            )
+        )
+
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                details="Project not found",
+            )
+
     task = models.Task(
         title=task_data.title,
         description=task_data.description,
         priority=task_data.priority,
         due_date=task_data.due_date,
         created_by_id=current_user.id,
+        project_id=task_data.project_id,
     )
+
     db.add(task)
     db.commit()
     db.refresh(task)
@@ -277,6 +352,13 @@ def update_task(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+
+    # Admins cannot access individual task records.
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins cannot update individual tasks",
+        )
 
     task = db.scalar(
         select(models.Task).where(
@@ -302,25 +384,38 @@ def update_task(
             detail="Provide at least one field to update",
         )
 
-    for field, value in update_data.items():
-        if value is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"{field} cannot be null",
-            )
-
     # Assigned users can only change task status.
     if task.created_by_id != current_user.id:
         if current_user.role != "user" or set(update_data.keys()) != {"status"}:
-
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only update the status of your assigned tasks",
             )
 
+    # Validate destination project ownership
+    if "project_id" in update_data and update_data["project_id"] is not None:
+        project = db.scalar(
+            select(models.Project).where(
+                models.Project.id == update_data["project_id"],
+                models.Project.created_by_id == current_user.id,
+            )
+        )
+
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+            )
+
+    # Validate fields, allowing project_id to be None.
+    for field, value in update_data.items():
+        if value is None and field != "project_id":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"{field} cannot be null",
+            )
+
     # Save the previous status before applying changes
     old_status = task.status
-    update_data = task_data.model_dump(exclude_unset=True)
 
     # Apply the requested changes.
     for field, value in update_data.items():
@@ -477,7 +572,7 @@ def get_task_activities(
     return activities
 
 
-# admin endpoints
+# ----------------------------------------------------------- admin endpoints ------------------------------------------------------
 @app.get("/admin/dashboard")
 def admin_dashboard(
     db: Session = Depends(get_db), admin: models.User = Depends(require_admin)
@@ -645,3 +740,189 @@ def update_user_role(
         "old_role": old_role,
         "new_role": user.role,
     }
+
+
+# ----------------------------------------------- Project Endpoints -----------------------------------------------------------------
+
+
+# Create a new project
+@app.post(
+    "/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED
+)
+def create_project(
+    project_data: ProjectCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    project = models.Project(
+        name=project_data.name,
+        description=project_data.description,
+        created_by_id=current_user.id,
+    )
+
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+
+    return project
+
+
+# Get all projects created by the current user
+@app.get("/projects", response_model=list[ProjectResponse])
+def get_projects(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins cannot access project data",
+        )
+    projects = db.scalars(
+        select(models.Project)
+        .where(models.Project.created_by_id == current_user.id)
+        .order_by(models.Project.created_at.desc())
+    ).all()
+
+    return projects
+
+
+# Get project by project id
+@app.get("/projects/{project_id}", response_model=ProjectResponse)
+def get_project_by_id(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    project = db.scalar(
+        select(models.Project).where(
+            models.Project.id == project_id,
+            models.Project.created_by_id == current_user.id,
+        )
+    )
+
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
+    return project
+
+
+# Update a project
+@app.patch("/projects/{project_id}", response_model=ProjectResponse)
+def update_project(
+    project_id: int,
+    project_data: ProjectUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins cannot edit individual projects",
+        )
+
+    project = db.scalar(
+        select(models.Project).where(
+            models.Project.id == project_id,
+            models.Project.created_by_id == current_user.id,
+        )
+    )
+
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+
+    update_data = project_data.model_dump(exclude_unset=True)
+
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide at least one field to update",
+        )
+
+    for field, value in update_data.items():
+        if value is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{field} cannot be null",
+            )
+
+        setattr(project, field, value)
+
+    db.commit()
+    db.refresh(project)
+
+    return project
+
+
+# Delete a project
+@app.delete("/projects/{project_id}", status_code=status.HTTP_200_OK)
+def delete_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin cannot delete individual projects",
+        )
+
+    project = db.scalar(
+        select(models.Project).where(
+            models.Project.id == project_id,
+            models.Project.created_by_id == current_user.id,
+        )
+    )
+
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
+
+    for task in project.tasks:
+        task.project_id = None
+
+    db.delete(project)
+    db.commit()
+
+    return {"message": "Project deleted successfully"}
+
+
+# endpoint to view project tasks
+@app.get("/projects/{project_id}/tasks", response_model=list[TaskResponse])
+def get_project_tasks(
+    project_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin cannot access individual project task",
+        )
+    project = db.scalar(
+        select(models.Project).where(
+            models.Project.id == project_id,
+            models.Project.created_by_id == current_user.id,
+        )
+    )
+
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        )
+
+    task = db.scalars(
+        select(models.Task)
+        .where(
+            models.Task.project_id == project_id,
+        )
+        .order_by(models.Task.id.desc())
+    )
+
+    return task
