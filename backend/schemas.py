@@ -16,7 +16,7 @@ class TaskUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=3, max_length=100)
     description: str | None = Field(default=None, max_length=500)
     priority: Literal["low", "medium", "high"] | None = None
-    status: str | None = None
+    status: Literal["todo", "in_progress", "completed"] | None = None
     project_id: int | None = None
 
 

@@ -252,9 +252,9 @@ def list_tasks(
 
     if overdue:
         conditions = conditions & (
-            (models.Task.due_date < datetime.now(timezone.utc))
+            (models.Task.due_date.is_not(None))
+            & (models.Task.due_date < datetime.now(timezone.utc))
             & (models.Task.status != "completed")
-            & (models.Task.due_date.is_not(None))
         )
 
     if due_before is not None:
@@ -284,6 +284,12 @@ def get_task(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins cannot access individual tasks",
+        )
+
     task = db.scalar(
         select(models.Task).where(
             models.Task.id == task_id,
@@ -313,6 +319,10 @@ def create_task(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin cannot create task"
+        )
 
     if task_data.project_id is not None:
         project = db.scalar(
@@ -325,7 +335,7 @@ def create_task(
         if project is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                details="Project not found",
+                detail="Project not found",
             )
 
     task = models.Task(
@@ -450,11 +460,22 @@ def update_task(
 
 # Delete a task
 @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_task(task_id: int, db: Session = Depends(get_db)):
+def delete_task(
+    task_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="admin cannot delete individual task",
+        )
+
     task = db.scalar(
         select(models.Task).where(
             models.Task.id == task_id,
-            models.Task.created_by_id == get_current_user().id,
+            models.Task.created_by_id == current_user.id,
         )
     )
 
@@ -477,9 +498,15 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
 def assign_task(
     task_id: int,
     assignment: TaskAssign,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
     supervisor: models.User = Depends(require_upper_user),
 ):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admins cannot assign task"
+        )
+
     task = db.scalar(
         select(models.Task).where(
             models.Task.id == task_id, models.Task.created_by_id == supervisor.id
@@ -666,25 +693,23 @@ def deactivate_user(
             detail="User not found",
         )
 
+    if user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="admin cannot deactivate other admins",
+        )
+
+        # if active_admins <= 1:
+        #     raise HTTPException(
+        #         status_code=status.HTTP_400_BAD_REQUEST,
+        #         detail="Cannot deactivate the last active administrator",
+        #     )
+
     # Prevent admins from deactivating themselves
     if user.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You cannot deactivate your own account",
-        )
-
-    if user.role == "admin" and user.is_active and not user_data.is_active:
-        active_admins = db.scalar(
-            select(func.count(models.User.id)).where(
-                models.User.role == "admin",
-                models.User.is_active == True,
-            )
-        )
-
-    if active_admins <= 1:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot deactivate the last active administrator",
         )
 
     user.is_active = user_data.is_active
@@ -754,6 +779,11 @@ def create_project(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins cannot create a project",
+        )
     project = models.Project(
         name=project_data.name,
         description=project_data.description,
@@ -784,6 +814,10 @@ def get_projects(
         .order_by(models.Project.created_at.desc())
     ).all()
 
+    # if projects is None:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+    #     )
     return projects
 
 
@@ -794,6 +828,11 @@ def get_project_by_id(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins cannot access individual projects",
+        )
     project = db.scalar(
         select(models.Project).where(
             models.Project.id == project_id,
