@@ -1,17 +1,14 @@
-from fastapi import FastAPI, HTTPException, status, Query, Depends
+from fastapi import FastAPI, HTTPException, status, Query, Depends, Response
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
-from pydantic import BaseModel, Field, ConfigDict
-from dotenv import load_dotenv
 import os
 from sqlalchemy.orm import Session
 from sqlalchemy import select, or_, func
 import models
-from database import get_db, Base, engine
+from database import get_db
 from schemas import (
     UserCreate,
     UserResponse,
     TokenResponse,
-    UserLogin,
     TaskCreate,
     TaskResponse,
     TaskUpdate,
@@ -22,11 +19,11 @@ from schemas import (
     ProjectResponse,
     ProjectUpdate,
 )
-from security import hash_password, verify_password
-
-# from models import TaskDB
+from security import hash_password, verify_password, verify_password_and_update
 from datetime import datetime, timedelta, timezone
 import jwt
+from strawberry.fastapi import GraphQLRouter
+from graphql_schema import schema
 
 SECRET_KEY = os.environ["SECRET_KEY"]
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
@@ -35,6 +32,10 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 app = FastAPI(title="TaskFlow API")
+
+graphql_app = GraphQLRouter(schema)
+
+app.include_router(graphql_app, prefix="/graphql")
 
 
 ## Dependency to get the current user from the token
@@ -98,7 +99,7 @@ def require_normal_user(
 def require_upper_user(
     current_user: models.User = Depends(get_current_user),
 ):
-    if current_user.role not in ["admin", "upper_user"]:
+    if current_user.role not in ["upper_user"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Supervisor privileges required",
@@ -177,11 +178,27 @@ def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    is_valid, updated_hash = verify_password_and_update(
+        form_data.password,
+        user.password_hash,
+    )
+
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is inactive",
         )
+
+    if updated_hash is not None:
+        user.password_hash = updated_hash
+        db.commit()
 
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
 
@@ -487,7 +504,7 @@ def delete_task(
     db.delete(task)
     db.commit()
 
-    return {"message": "Task deleted successfully"}
+    return Response(status_code=204)
 
 
 # Assign a task to a user
@@ -576,17 +593,6 @@ def get_task_activities(
         raise HTTPException(
             status_code=404,
             detail="Task not found",
-        )
-
-    # Only the task creator, assignee, or an admin can view history
-    if (
-        task.created_by_id != current_user.id
-        and task.assigned_to_id != current_user.id
-        and current_user.role != "admin"
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="Not authorized to view this task's activity",
         )
 
     activities = (
@@ -871,7 +877,7 @@ def update_project(
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Task not found",
+            detail="Project not found",
         )
 
     update_data = project_data.model_dump(exclude_unset=True)
@@ -958,10 +964,8 @@ def get_project_tasks(
 
     task = db.scalars(
         select(models.Task)
-        .where(
-            models.Task.project_id == project_id,
-        )
+        .where(models.Task.project_id == project_id)
         .order_by(models.Task.id.desc())
-    )
+    ).all()
 
     return task

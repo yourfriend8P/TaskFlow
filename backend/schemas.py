@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from typing import Literal
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 
 # Pydantic model for incoming task data
@@ -13,7 +13,7 @@ class TaskCreate(BaseModel):
 
 
 class TaskUpdate(BaseModel):
-    title: str | None = Field(default=None, min_length=3, max_length=100)
+    title: str | None = Field(default=None, min_length=3, max_length=150)
     description: str | None = Field(default=None, max_length=500)
     priority: Literal["low", "medium", "high"] | None = None
     status: Literal["todo", "in_progress", "completed"] | None = None
@@ -26,9 +26,8 @@ class TaskResponse(BaseModel):
     id: int
     title: str
     description: str
-    # completed: bool
-    status: str
-    priority: str
+    status: Literal["todo", "in_progress", "completed"]
+    priority: Literal["low", "medium", "high"]
     project_id: int | None
 
 

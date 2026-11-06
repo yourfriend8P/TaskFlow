@@ -1,3 +1,7 @@
+from models import User
+from security import hash_password
+
+
 def test_register_user(client):
     response = client.post(
         "/auth/register",
@@ -142,3 +146,39 @@ def test_health_endpoint(client):
     response = client.get("/health")
 
     assert response.status_code == 200
+
+
+def test_login_upgrades_bcrypt_to_argon2(client, db_session):
+    # Register a user normally.
+    client.post(
+        "/auth/register",
+        json={
+            "name": "Legacy User",
+            "email": "legacy@example.com",
+            "password": "password123",
+        },
+    )
+
+    # Replace the user's Argon2 hash with an old bcrypt hash.
+    user = db_session.query(User).filter_by(email="legacy@example.com").first()
+
+    from passlib.context import CryptContext
+
+    bcrypt_context = CryptContext(schemes=["bcrypt"])
+    user.password_hash = bcrypt_context.hash("password123")
+    db_session.commit()
+
+    # Login using the correct password.
+    response = client.post(
+        "/auth/login",
+        data={
+            "username": "legacy@example.com",
+            "password": "password123",
+        },
+    )
+
+    assert response.status_code == 200
+
+    # Confirm the stored hash has been upgraded to Argon2.
+    db_session.refresh(user)
+    assert user.password_hash.startswith("$argon2")
