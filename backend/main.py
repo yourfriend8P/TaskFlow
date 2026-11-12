@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, status, Query, Depends, Response
+from fastapi import FastAPI, HTTPException, status, Query, Depends, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 import os
 from sqlalchemy.orm import Session
@@ -32,10 +32,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 app = FastAPI(title="TaskFlow API")
-
-graphql_app = GraphQLRouter(schema)
-
-app.include_router(graphql_app, prefix="/graphql")
 
 
 ## Dependency to get the current user from the token
@@ -71,6 +67,41 @@ def get_current_user(
         raise credentials_exception
 
     return user
+
+
+def get_graphql_context(request: Request, db: Session = Depends(get_db)):
+    authorization = request.headers.get("Authorization")
+
+    print("AUTHORIZATION HEADER:", bool(authorization))
+
+    if not authorization:
+        return {"current_user": None}
+
+    scheme, _, token = authorization.partition(" ")
+
+    print("BEARER SCHEME:", scheme)
+    print("TOKEN RECEIVED:", bool(token))
+
+    if scheme.lower() != "bearer" or not token:
+        return {"current_user": None}
+
+    try:
+        current_user = get_current_user(
+            token=token,
+            db=db,
+        )
+    except HTTPException:
+        current_user = None
+
+    return {"current_user": current_user}
+
+
+graphql_app = GraphQLRouter(
+    schema,
+    context_getter=get_graphql_context,
+)
+
+app.include_router(graphql_app, prefix="/graphql")
 
 
 # Dependency to require admin role
