@@ -72,18 +72,13 @@ def get_current_user(
 def get_graphql_context(request: Request, db: Session = Depends(get_db)):
     authorization = request.headers.get("Authorization")
 
-    print("AUTHORIZATION HEADER:", bool(authorization))
-
     if not authorization:
         return {"current_user": None}
 
     scheme, _, token = authorization.partition(" ")
 
-    print("BEARER SCHEME:", scheme)
-    print("TOKEN RECEIVED:", bool(token))
-
     if scheme.lower() != "bearer" or not token:
-        return {"current_user": None}
+        return {"current_user": None, "db": db}
 
     try:
         current_user = get_current_user(
@@ -93,7 +88,10 @@ def get_graphql_context(request: Request, db: Session = Depends(get_db)):
     except HTTPException:
         current_user = None
 
-    return {"current_user": current_user}
+    return {
+        "current_user": current_user,
+        "db": db,
+    }
 
 
 graphql_app = GraphQLRouter(

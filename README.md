@@ -6,3 +6,4 @@ pytest backend/tests/test_projects.py -v
 
 Note to myself:
 Understand security.py and login() endpoint
+Understand update_task part where Assigned users can only change status
