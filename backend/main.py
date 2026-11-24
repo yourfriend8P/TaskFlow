@@ -849,10 +849,10 @@ def get_projects(
         .order_by(models.Project.created_at.desc())
     ).all()
 
-    # if projects is None:
-    #     raise HTTPException(
-    #         status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
-    #     )
+    if projects is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
     return projects
 
 

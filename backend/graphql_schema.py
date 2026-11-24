@@ -1,9 +1,12 @@
+from multiprocessing.util import info
+
+from cross_web import HTTPException
 import strawberry
 from strawberry.types import Info
 from datetime import datetime
 import models
-from sqlalchemy import select
-from schemas import TaskCreate, TaskUpdate, ProjectUpdate, ProjectCreate
+from sqlalchemy import func, select
+from schemas import TaskCreate, TaskUpdate, ProjectUpdate, ProjectCreate, UserRoleUpdate
 from pydantic import ValidationError
 
 
@@ -16,6 +19,17 @@ class UserType:
     is_active: bool
 
 
+@strawberry.input
+class UserStatusInput:
+    is_active: bool
+
+
+@strawberry.input
+class UserRoleInput:
+    role: str
+
+
+# ------------------task-------------------
 @strawberry.type
 class TaskType:
     id: int
@@ -29,17 +43,6 @@ class TaskType:
     assigned_to_id: int | None
     created_at: datetime
     updated_at: datetime
-
-
-@strawberry.type
-class ProjectType:
-    id: int
-    name: str
-    description: str
-    created_by_id: int
-    created_at: datetime
-    creator: UserType
-    tasks: list["TaskType"]
 
 
 @strawberry.input
@@ -61,6 +64,35 @@ class TaskUpdateInput:
 
 
 @strawberry.input
+class TaskAssignInput:
+    assigned_to_id: int
+
+
+@strawberry.type
+class TaskActivityType:
+    id: int
+    task_id: int
+    actor_id: int
+    action: str
+    old_status: str | None
+    new_status: str | None
+    details: str
+    created_at: datetime
+
+
+# ------------------project-------------------
+@strawberry.type
+class ProjectType:
+    id: int
+    name: str
+    description: str
+    created_by_id: int
+    created_at: datetime
+    creator: UserType
+    tasks: list["TaskType"]
+
+
+@strawberry.input
 class ProjectInput:
     name: str
     description: str = ""
@@ -70,6 +102,34 @@ class ProjectInput:
 class ProjectUpdateInput:
     name: str | None = strawberry.UNSET
     description: str | None = strawberry.UNSET
+
+
+@strawberry.type
+class TasksByStatusType:
+    todo: int
+    in_progress: int
+    completed: int
+
+
+# ------------------admin dashboard-------------------
+@strawberry.type
+class AdminDashboardType:
+    total_users: int
+    active_users: int
+    total_tasks: int
+    tasks_by_status: TasksByStatusType
+    overdue_tasks: int
+    upcoming_tasks: int
+    completion_rate: float
+
+
+@strawberry.type
+class AdminUserType:
+    id: int
+    name: str
+    email: str
+    role: str
+    is_active: bool
 
 
 @strawberry.type
@@ -226,6 +286,146 @@ class Query:
             creator=project.creator,
             tasks=project.tasks,
         )
+
+    @strawberry.field
+    def get_task_activities(self, info: Info, task_id: int) -> list[TaskActivityType]:
+
+        user = info.context["current_user"]
+        db = info.context["db"]
+
+        # Check authentication
+        if user is None:
+            raise Exception("Not authenticated")
+
+        # Admin cannot access individual task activities
+        if user.role == "admin":
+            raise Exception("Admin cannot access individual task activities")
+
+        # Check if the task exists and belongs to the user (creator or assigned to)
+        task = db.scalar(
+            select(models.Task).where(
+                models.Task.id == task_id,
+                (
+                    (models.Task.created_by_id == user.id)
+                    | (models.Task.assigned_to_id == user.id)
+                ),
+            )
+        )
+
+        if task is None:
+            raise Exception("Task not found")
+
+        # Retrieve task activities, newest first
+        activities = db.scalars(
+            select(models.TaskActivity)
+            .filter(models.TaskActivity.task_id == task_id)
+            .order_by(models.TaskActivity.created_at.desc())
+        ).all()
+
+        return [
+            TaskActivityType(
+                id=activity.id,
+                task_id=activity.task_id,
+                actor_id=activity.actor_id,
+                action=activity.action,
+                old_status=activity.old_status,
+                new_status=activity.new_status,
+                details=activity.details,
+                created_at=activity.created_at,
+            )
+            for activity in activities
+        ]
+
+    @strawberry.field
+    def admin_dashboard(self, info: Info) -> AdminDashboardType:
+        user = info.context["current_user"]
+        db = info.context["db"]
+
+        if user is None:
+            raise Exception("Not authenticated")
+
+        if user.role != "admin":
+            raise Exception("Only admin can access the dashboard")
+
+        total_users = db.scalar(select(func.count(models.User.id)))
+
+        active_users = db.scalar(
+            select(func.count(models.User.id)).where(models.User.is_active == True)
+        )
+        total_tasks = db.scalar(select(func.count(models.Task.id)))
+
+        status_result = db.execute(
+            select(models.Task.status, func.count(models.Task.id)).group_by(
+                models.Task.status
+            )
+        ).all()
+
+        tasks_by_status = {
+            "todo": 0,
+            "in_progress": 0,
+            "completed": 0,
+        }
+
+        for task_status, count in status_result:
+            tasks_by_status[task_status] = count
+
+        overdue_tasks = db.scalar(
+            select(func.count(models.Task.id)).where(
+                models.Task.due_date < datetime.utcnow(),
+                models.Task.status != "completed",
+            )
+        )
+        upcoming_tasks = db.scalar(
+            select(func.count(models.Task.id)).where(
+                models.Task.due_date >= datetime.utcnow(),
+                models.Task.status != "completed",
+            )
+        )
+        completed_tasks = db.scalar(
+            select(func.count(models.Task.id)).where(models.Task.status == "completed")
+        )
+
+        completion_rate = (
+            (completed_tasks / total_tasks) * 100 if total_tasks > 0 else 0
+        )
+
+        return AdminDashboardType(
+            total_users=total_users,
+            active_users=active_users,
+            total_tasks=total_tasks,
+            tasks_by_status=TasksByStatusType(
+                todo=tasks_by_status["todo"],
+                in_progress=tasks_by_status["in_progress"],
+                completed=tasks_by_status["completed"],
+            ),
+            overdue_tasks=overdue_tasks,
+            upcoming_tasks=upcoming_tasks,
+            completion_rate=completion_rate,
+        )
+
+    @strawberry.field
+    def all_users(self, info: Info) -> list[AdminUserType]:
+        user = info.context["current_user"]
+        db = info.context["db"]
+
+        if user is None:
+            raise Exception("Not authenticated")
+
+        if user.role != "admin":
+            raise Exception("Only admins can access all users")
+
+        users = db.scalars(select(models.User).order_by(models.User.id)).all()
+
+        return [
+            AdminUserType(
+                id=user.id,
+                name=user.name,
+                email=user.email,
+                role=user.role,
+                is_active=user.is_active,
+            )
+            for user in users
+        ]
 
 
 @strawberry.type
@@ -572,6 +772,166 @@ class Mutation:
         db.commit()
 
         return True
+
+    @strawberry.mutation
+    def task_assign(
+        self, info: Info, task_id: int, assign_data: TaskAssignInput
+    ) -> TaskType:
+        user = info.context["current_user"]
+        db = info.context["db"]
+
+        # Check authentication
+        if user is None:
+            raise Exception("Not authenticated")
+
+        # Only supervisors can assign tasks
+        if user.role != "upper_user":
+            raise Exception("Only supervisors can assign tasks")
+
+        task = db.scalar(
+            select(models.Task).where(
+                models.Task.id == task_id, models.Task.created_by_id == user.id
+            )
+        )
+
+        if task is None:
+            raise Exception("Task not found")
+
+        # Find the user receiving the task
+        assigned_user = db.scalar(
+            select(models.User).where(models.User.id == assign_data.assigned_to_id)
+        )
+
+        if assigned_user is None:
+            raise Exception("Assigned user not found")
+
+        # Only normal users can receive tasks
+        if assigned_user.role != "user":
+            raise Exception("Tasks can only be assigned to normal users")
+
+        # Assign the task
+        task.assigned_to_id = assign_data.assigned_to_id
+
+        # Record activity
+        activity = models.TaskActivity(
+            task_id=task.id,
+            actor_id=user.id,
+            action="task assigned",
+            details=f"Task assigned to user {assigned_user.id}",
+        )
+
+        db.add(activity)
+        db.commit()
+        db.refresh(task)
+
+        return TaskType(
+            id=task.id,
+            title=task.title,
+            description=task.description,
+            status=task.status,
+            priority=task.priority,
+            due_date=task.due_date,
+            project_id=task.project_id,
+            created_by_id=task.created_by_id,
+            assigned_to_id=task.assigned_to_id,
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+        )
+
+    @strawberry.mutation
+    def update_user_status(
+        self, info: Info, user_id: int, status_data: UserStatusInput
+    ) -> AdminUserType:
+        user = info.context["current_user"]
+        db = info.context["db"]
+
+        # Check authentication
+        if user is None:
+            raise Exception("Not authenticated")
+
+        # Only admins can update user status
+        if user.role != "admin":
+            raise Exception("Only admins can update user status")
+
+        target_user = db.scalar(select(models.User).where(models.User.id == user_id))
+
+        # Check if the target user is the same as the current user
+        if target_user.id == user.id:
+            raise Exception("You cannot deactivate your own account")
+
+        # Check if the target user is an admin
+        if target_user.role == "admin":
+            raise Exception("Admins cannot deactivate other admins")
+
+        target_user = db.scalar(select(models.User).where(models.User.id == user_id))
+
+        if target_user is None:
+            raise Exception("User not found")
+
+        target_user.is_active = status_data.is_active
+
+        db.commit()
+        db.refresh(target_user)
+
+        return AdminUserType(
+            id=target_user.id,
+            name=target_user.name,
+            email=target_user.email,
+            role=target_user.role,
+            is_active=target_user.is_active,
+        )
+
+    @strawberry.mutation
+    def update_user_role(
+        self, info: Info, user_id: int, role_data: UserRoleInput
+    ) -> AdminUserType:
+        user = info.context["current_user"]
+        db = info.context["db"]
+
+        # Check authentication
+        if user is None:
+            raise Exception("Not authenticated")
+
+        # Only admins can update user roles
+        if user.role != "admin":
+            raise Exception("Only admins can update user roles")
+
+        target_user = db.scalar(select(models.User).where(models.User.id == user_id))
+
+        if target_user is None:
+            raise Exception("User not found")
+
+        # Check if the target user is the same as the current user
+        if target_user.id == user.id:
+            raise Exception("You cannot change your own role")
+
+        # Check if the target user is an admin
+        if target_user.role == "admin":
+            raise Exception("Admins cannot change the role of other admins")
+
+        # for now, we will not allow changing a user's role to admin through this endpoint
+        if role_data.role == "admin":
+            raise Exception(
+                "You cannot assign the admin role to any user",
+            )
+
+        try:
+            validated_role = UserRoleUpdate(role=role_data.role)
+        except ValueError as e:
+            raise Exception(str(e))
+
+        target_user.role = validated_role.role
+
+        db.commit()
+        db.refresh(target_user)
+
+        return AdminUserType(
+            id=target_user.id,
+            name=target_user.name,
+            email=target_user.email,
+            role=target_user.role,
+            is_active=target_user.is_active,
+        )
 
 
 schema = strawberry.Schema(query=Query, mutation=Mutation)
