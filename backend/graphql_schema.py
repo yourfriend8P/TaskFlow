@@ -43,6 +43,10 @@ class TaskType:
     assigned_to_id: int | None
     created_at: datetime
     updated_at: datetime
+    # relationships
+    creator: UserType
+    assigned_user: UserType | None
+    project: "ProjectType | None"
 
 
 @strawberry.input
@@ -184,6 +188,44 @@ class Query:
                 assigned_to_id=task.assigned_to_id,
                 created_at=task.created_at,
                 updated_at=task.updated_at,
+                # Relationships
+                creator=UserType(
+                    id=task.creator.id,
+                    name=task.creator.name,
+                    email=task.creator.email,
+                    role=task.creator.role,
+                    is_active=task.creator.is_active,
+                ),
+                assigned_user=(
+                    UserType(
+                        id=task.assignee.id,
+                        name=task.assignee.name,
+                        email=task.assignee.email,
+                        role=task.assignee.role,
+                        is_active=task.assignee.is_active,
+                    )
+                    if task.assignee
+                    else None
+                ),
+                project=(
+                    ProjectType(
+                        id=task.project.id,
+                        name=task.project.name,
+                        description=task.project.description,
+                        created_by_id=task.project.created_by_id,
+                        created_at=task.project.created_at,
+                        creator=UserType(
+                            id=task.project.creator.id,
+                            name=task.project.creator.name,
+                            email=task.project.creator.email,
+                            role=task.project.creator.role,
+                            is_active=task.project.creator.is_active,
+                        ),
+                        tasks=[],
+                    )
+                    if task.project
+                    else None
+                ),
             )
             for task in tasks
         ]
@@ -488,6 +530,43 @@ class Mutation:
             assigned_to_id=task.assigned_to_id,
             created_at=task.created_at,
             updated_at=task.updated_at,
+            creator=UserType(
+                id=user.id,
+                name=user.name,
+                email=user.email,
+                role=user.role,
+                is_active=user.is_active,
+            ),
+            assigned_user=(
+                UserType(
+                    id=task.assignee.id,
+                    name=task.assignee.name,
+                    email=task.assignee.email,
+                    role=task.assignee.role,
+                    is_active=task.assignee.is_active,
+                )
+                if task.assignee
+                else None
+            ),
+            project=(
+                ProjectType(
+                    id=task.project.id,
+                    name=task.project.name,
+                    description=task.project.description,
+                    created_by_id=task.project.created_by_id,
+                    created_at=task.project.created_at,
+                    creator=UserType(
+                        id=task.project.creator.id,
+                        name=task.project.creator.name,
+                        email=task.project.creator.email,
+                        role=task.project.creator.role,
+                        is_active=task.project.creator.is_active,
+                    ),
+                    tasks=[],
+                )
+                if task.project
+                else None
+            ),
         )
 
     @strawberry.mutation
