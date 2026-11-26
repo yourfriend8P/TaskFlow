@@ -1,11 +1,9 @@
 from multiprocessing.util import info
-
-from cross_web import HTTPException
 import strawberry
 from strawberry.types import Info
-from datetime import datetime
+from datetime import datetime, timezone
 import models
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select, case
 from schemas import TaskCreate, TaskUpdate, ProjectUpdate, ProjectCreate, UserRoleUpdate
 from pydantic import ValidationError
 
@@ -84,6 +82,14 @@ class TaskActivityType:
     created_at: datetime
 
 
+@strawberry.type
+class TaskConnection:
+    items: list[TaskType]
+    total: int
+    limit: int
+    offset: int
+
+
 # ------------------project-------------------
 @strawberry.type
 class ProjectType:
@@ -115,6 +121,14 @@ class TasksByStatusType:
     completed: int
 
 
+@strawberry.type
+class ProjectConnection:
+    items: list[ProjectType]
+    total: int
+    limit: int
+    offset: int
+
+
 # ------------------admin dashboard-------------------
 @strawberry.type
 class AdminDashboardType:
@@ -134,6 +148,14 @@ class AdminUserType:
     email: str
     role: str
     is_active: bool
+
+
+@strawberry.type
+class AdminUserConnection:
+    items: list[AdminUserType]
+    total: int
+    limit: int
+    offset: int
 
 
 @strawberry.type
@@ -159,76 +181,156 @@ class Query:
         )
 
     @strawberry.field
-    def get_tasks(self, info: Info) -> list[TaskType]:
+    def get_tasks(
+        self,
+        info: Info,
+        limit: int = 10,
+        offset: int = 0,
+        project_id: int | None = None,
+        task_status: str | None = None,
+        priority: str | None = None,
+        search: str | None = None,
+        overdue: bool = False,
+        due_before: datetime | None = None,
+        sort_by: str = "newest",
+    ) -> TaskConnection:
         user = info.context["current_user"]
         db = info.context["db"]
 
         if user is None:
             raise Exception("Not authenticated")
 
-        tasks = db.scalars(
-            select(models.Task)
-            .where(
-                (models.Task.created_by_id == user.id)
-                | (models.Task.assigned_to_id == user.id)
-            )
-            .order_by(models.Task.id.desc())
-        ).all()
+        if user.role == "admin":
+            raise Exception("Admin cannot access individual tasks")
 
-        return [
-            TaskType(
-                id=task.id,
-                title=task.title,
-                description=task.description,
-                status=task.status,
-                priority=task.priority,
-                due_date=task.due_date,
-                project_id=task.project_id,
-                created_by_id=task.created_by_id,
-                assigned_to_id=task.assigned_to_id,
-                created_at=task.created_at,
-                updated_at=task.updated_at,
-                # Relationships
-                creator=UserType(
-                    id=task.creator.id,
-                    name=task.creator.name,
-                    email=task.creator.email,
-                    role=task.creator.role,
-                    is_active=task.creator.is_active,
-                ),
-                assigned_user=(
-                    UserType(
-                        id=task.assignee.id,
-                        name=task.assignee.name,
-                        email=task.assignee.email,
-                        role=task.assignee.role,
-                        is_active=task.assignee.is_active,
-                    )
-                    if task.assignee
-                    else None
-                ),
-                project=(
-                    ProjectType(
-                        id=task.project.id,
-                        name=task.project.name,
-                        description=task.project.description,
-                        created_by_id=task.project.created_by_id,
-                        created_at=task.project.created_at,
-                        creator=UserType(
-                            id=task.project.creator.id,
-                            name=task.project.creator.name,
-                            email=task.project.creator.email,
-                            role=task.project.creator.role,
-                            is_active=task.project.creator.is_active,
-                        ),
-                        tasks=[],
-                    )
-                    if task.project
-                    else None
-                ),
+        conditions = (models.Task.created_by_id == user.id) | (
+            models.Task.assigned_to_id == user.id
+        )
+        # Validate pagination parameters
+        if limit < 1 or limit > 100:
+            raise Exception("Limit must be between 1 and 100")
+
+        if offset < 0:
+            raise Exception("Offset cannot be negative")
+
+        if project_id is not None:
+            conditions = conditions & (models.Task.project_id == project_id)
+
+        if task_status is not None:
+            if task_status not in ["todo", "in_progress", "completed"]:
+                raise Exception("Invalid task status")
+            conditions = conditions & (models.Task.status == task_status)
+
+        if priority is not None:
+            if priority not in ["low", "medium", "high"]:
+                raise Exception("Invalid priority")
+            conditions = conditions & (models.Task.priority == priority)
+
+        if search is not None:
+            search = search.strip()
+
+            if search:
+                conditions = conditions & (models.Task.title.ilike(f"%{search}%"))
+
+        if overdue:
+            conditions = conditions & (
+                (models.Task.due_date.is_not(None))
+                & (models.Task.due_date < datetime.now(timezone.utc))
+                & (models.Task.status != "completed")
             )
-            for task in tasks
-        ]
+
+        if due_before is not None:
+            conditions = conditions & (models.Task.due_date <= due_before)
+
+        sort_options = {
+            "newest": models.Task.id.desc(),
+            "oldest": models.Task.id.asc(),
+            "priority_high": case(
+                (models.Task.priority == "high", 1),
+                (models.Task.priority == "medium", 2),
+                (models.Task.priority == "low", 3),
+            ),
+            "priority_low": case(
+                (models.Task.priority == "low", 1),
+                (models.Task.priority == "medium", 2),
+                (models.Task.priority == "high", 3),
+            ),
+            "due_date": models.Task.due_date.asc().nullslast(),
+        }
+
+        if sort_by not in sort_options:
+            raise Exception("Invalid sorting option")
+
+        total = db.scalar(select(func.count(models.Task.id)).where(conditions))
+
+        statement = (
+            select(models.Task)
+            .where(conditions)
+            .order_by(sort_options[sort_by])
+            .offset(offset)
+            .limit(limit)
+        )
+        tasks = db.scalars(statement).all()
+
+        return TaskConnection(
+            items=[
+                TaskType(
+                    id=task.id,
+                    title=task.title,
+                    description=task.description,
+                    status=task.status,
+                    priority=task.priority,
+                    due_date=task.due_date,
+                    project_id=task.project_id,
+                    created_by_id=task.created_by_id,
+                    assigned_to_id=task.assigned_to_id,
+                    created_at=task.created_at,
+                    updated_at=task.updated_at,
+                    # Relationships
+                    creator=UserType(
+                        id=task.creator.id,
+                        name=task.creator.name,
+                        email=task.creator.email,
+                        role=task.creator.role,
+                        is_active=task.creator.is_active,
+                    ),
+                    assigned_user=(
+                        UserType(
+                            id=task.assignee.id,
+                            name=task.assignee.name,
+                            email=task.assignee.email,
+                            role=task.assignee.role,
+                            is_active=task.assignee.is_active,
+                        )
+                        if task.assignee
+                        else None
+                    ),
+                    project=(
+                        ProjectType(
+                            id=task.project.id,
+                            name=task.project.name,
+                            description=task.project.description,
+                            created_by_id=task.project.created_by_id,
+                            created_at=task.project.created_at,
+                            creator=UserType(
+                                id=task.project.creator.id,
+                                name=task.project.creator.name,
+                                email=task.project.creator.email,
+                                role=task.project.creator.role,
+                                is_active=task.project.creator.is_active,
+                            ),
+                            tasks=[],
+                        )
+                        if task.project
+                        else None
+                    ),
+                )  # Keep all your existing TaskType fields here
+                for task in tasks
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
 
     @strawberry.field
     def get_task_by_id(self, info: Info, TaskId: int) -> TaskType:
@@ -269,7 +371,14 @@ class Query:
         )
 
     @strawberry.field
-    def get_projects(self, info: Info) -> list[ProjectType]:
+    def get_projects(
+        self,
+        info: Info,
+        limit: int = 10,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "newest",
+    ) -> ProjectConnection:
         user = info.context["current_user"]
         db = info.context["db"]
 
@@ -279,24 +388,64 @@ class Query:
         if user.role == "admin":
             raise Exception("Admin cannot access individual projects")
 
-        projects = db.scalars(
-            select(models.Project)
+        if search is not None:
+            search = search.strip()
+
+        # Validate pagination parameters
+        if limit < 1 or limit > 100:
+            raise Exception("Limit must be between 1 and 100")
+
+        if offset < 0:
+            raise Exception("Offset cannot be negative")
+
+        # project filter options
+        sort_options = {
+            "newest": models.Project.id.desc(),
+            "oldest": models.Project.id.asc(),
+            "name_asc": models.Project.name.asc(),
+            "name_desc": models.Project.name.desc(),
+        }
+        if sort_by not in sort_options:
+            raise Exception("Invalid sorting option")
+
+        statement = select(models.Project).where(
+            models.Project.created_by_id == user.id
+        )
+
+        if search:
+            statement = statement.where(models.Project.name.ilike(f"%{search}%"))
+
+        total = db.scalar(
+            select(func.count(models.Project.id))
             .where(models.Project.created_by_id == user.id)
-            .order_by(models.Project.created_at.desc())
+            .where(models.Project.name.ilike(f"%{search}%"))
+            if search
+            else select(func.count(models.Project.id)).where(
+                models.Project.created_by_id == user.id
+            )
+        )
+
+        projects = db.scalars(
+            statement.order_by(sort_options[sort_by]).limit(limit).offset(offset)
         ).all()
 
-        return [
-            ProjectType(
-                id=project.id,
-                name=project.name,
-                description=project.description,
-                created_by_id=project.created_by_id,
-                created_at=project.created_at,
-                creator=project.creator,
-                tasks=project.tasks,
-            )
-            for project in projects
-        ]
+        return ProjectConnection(
+            items=[
+                ProjectType(
+                    id=project.id,
+                    name=project.name,
+                    description=project.description,
+                    created_by_id=project.created_by_id,
+                    created_at=project.created_at,
+                    creator=project.creator,
+                    tasks=project.tasks,
+                )
+                for project in projects
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
 
     @strawberry.field
     def get_projects_by_id(self, info: Info, project_id: int) -> ProjectType:
@@ -330,7 +479,9 @@ class Query:
         )
 
     @strawberry.field
-    def get_task_activities(self, info: Info, task_id: int) -> list[TaskActivityType]:
+    def get_task_activities(
+        self, info: Info, task_id: int, sort_by: str = "newest"
+    ) -> list[TaskActivityType]:
 
         user = info.context["current_user"]
         db = info.context["db"]
@@ -343,6 +494,12 @@ class Query:
         if user.role == "admin":
             raise Exception("Admin cannot access individual task activities")
 
+        sort_options = {
+            "newest": models.TaskActivity.created_at.desc(),
+            "oldest": models.TaskActivity.created_at.asc(),
+        }
+        if sort_by not in sort_options:
+            raise Exception("Invalid sorting option")
         # Check if the task exists and belongs to the user (creator or assigned to)
         task = db.scalar(
             select(models.Task).where(
@@ -361,7 +518,7 @@ class Query:
         activities = db.scalars(
             select(models.TaskActivity)
             .filter(models.TaskActivity.task_id == task_id)
-            .order_by(models.TaskActivity.created_at.desc())
+            .order_by(sort_options[sort_by])
         ).all()
 
         return [
@@ -446,7 +603,16 @@ class Query:
         )
 
     @strawberry.field
-    def all_users(self, info: Info) -> list[AdminUserType]:
+    def all_users(
+        self,
+        info: Info,
+        sort_by: str = "id",
+        search: str | None = None,
+        role: str | None = None,
+        is_active: bool | None = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> AdminUserConnection:
         user = info.context["current_user"]
         db = info.context["db"]
 
@@ -456,18 +622,93 @@ class Query:
         if user.role != "admin":
             raise Exception("Only admins can access all users")
 
-        users = db.scalars(select(models.User).order_by(models.User.id)).all()
+        # Validate pagination
+        if limit < 1 or limit > 100:
+            raise Exception("Limit must be between 1 and 100")
 
-        return [
-            AdminUserType(
-                id=user.id,
-                name=user.name,
-                email=user.email,
-                role=user.role,
-                is_active=user.is_active,
+        if offset < 0:
+            raise Exception("Offset cannot be negative")
+
+        sort_options = {
+            "id": models.User.id.asc(),
+            "name": models.User.name.asc(),
+            "email": models.User.email.asc(),
+            "role": models.User.role.asc(),
+            "is_active": models.User.is_active.desc(),
+            "inactive": models.User.is_active.asc(),
+        }
+        if sort_by not in sort_options:
+            raise Exception("Invalid sorting option")
+
+        # Build the base query
+        conditions = []
+
+        # Search by name or email
+        if search is not None:
+            search = search.strip()
+
+            if search:
+                conditions.append(
+                    (models.User.name.ilike(f"%{search}%"))
+                    | (models.User.email.ilike(f"%{search}%"))
+                )
+
+        # Filter by role
+        if role is not None:
+            if role not in ["user", "upper", "admin"]:
+                raise Exception("Invalid user role")
+
+            conditions.append(models.User.role == role)
+
+        # Filter by active status
+        if is_active is not None:
+            conditions.append(models.User.is_active == is_active)
+
+        # Preserve existing sorting behavior
+        if sort_by == "inactive":
+            conditions.append(models.User.is_active.is_(False))
+
+        elif sort_by == "is_active":
+            conditions.append(models.User.is_active.is_(True))
+
+        # Apply filters
+        stmt = select(models.User)
+
+        if conditions:
+            stmt = stmt.where(*conditions)
+
+        # Count all matching users before pagination
+        total = (
+            db.scalar(
+                select(func.count(models.User.id))
+                .select_from(models.User)
+                .where(*conditions)
             )
-            for user in users
-        ]
+            if conditions
+            else db.scalar(select(func.count(models.User.id)))
+        )
+
+        # Retrieve paginated users
+        users = db.scalars(
+            stmt.order_by(sort_options[sort_by]).limit(limit).offset(offset)
+        ).all()
+
+        # Return users with pagination metadata
+        return AdminUserConnection(
+            items=[
+                AdminUserType(
+                    id=admin_user.id,
+                    name=admin_user.name,
+                    email=admin_user.email,
+                    role=admin_user.role,
+                    is_active=admin_user.is_active,
+                )
+                for admin_user in users
+            ],
+            total=total or 0,
+            limit=limit,
+            offset=offset,
+        )
 
 
 @strawberry.type
